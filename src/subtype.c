@@ -2693,23 +2693,22 @@ static int num_occurs(jl_tvar_t *v, jl_typeenv_t *env)
     return 0;
 }
 
+#define HANDLE_UNIONALL_A                                               \
+    jl_unionall_t *ua = (jl_unionall_t*)a;                              \
+    jl_typeenv_t newenv = { ua->var, 0x0, env };                        \
+    newenv.val = (jl_value_t*)(intptr_t)count_occurs(ua->body, ua->var); \
+    return type_morespecific_(ua->body, b, invariant, &newenv)
+
+#define HANDLE_UNIONALL_B                                               \
+    jl_unionall_t *ub = (jl_unionall_t*)b;                              \
+    jl_typeenv_t newenv = { ub->var, 0x0, env };                        \
+    newenv.val = (jl_value_t*)(intptr_t)count_occurs(ub->body, ub->var); \
+    return type_morespecific_(a, ub->body, invariant, &newenv)
+
 static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_typeenv_t *env)
 {
     if (a == b)
         return 0;
-
-    if (jl_is_unionall(a)) {
-        jl_unionall_t *ua = (jl_unionall_t*)a;
-        jl_typeenv_t newenv = { ua->var, 0x0, env };
-        newenv.val = (jl_value_t*)(intptr_t)count_occurs(ua->body, ua->var);
-        return type_morespecific_(ua->body, b, invariant, &newenv);
-    }
-    if (jl_is_unionall(b)) {
-        jl_unionall_t *ub = (jl_unionall_t*)b;
-        jl_typeenv_t newenv = { ub->var, 0x0, env };
-        newenv.val = (jl_value_t*)(intptr_t)count_occurs(ub->body, ub->var);
-        return type_morespecific_(a, ub->body, invariant, &newenv);
-    }
 
     if (jl_is_tuple_type(a) && jl_is_tuple_type(b)) {
         // When one is JL_VARARG_BOUND and the other has fixed length,
@@ -2729,6 +2728,9 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
     }
 
     if (jl_is_uniontype(a)) {
+        if (jl_is_unionall(b)) {
+            HANDLE_UNIONALL_B;
+        }
         // Union a is more specific than b if some element of a is more specific than b, but
         // not vice-versa.
         if (sub_msp(b, a, env))
@@ -2765,6 +2767,9 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
     }
 
     if (jl_is_uniontype(b)) {
+        if (jl_is_unionall(a)) {
+            HANDLE_UNIONALL_A;
+        }
         jl_uniontype_t *u = (jl_uniontype_t*)b;
         if (type_morespecific_(a, u->a, invariant, env) || type_morespecific_(a, u->b, invariant, env))
             return !type_morespecific_(b, a, invariant, env);
@@ -2797,13 +2802,20 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
                 for(size_t i=0; i < jl_nparams(tta); i++) {
                     jl_value_t *apara = jl_tparam(tta,i);
                     jl_value_t *bpara = jl_tparam(ttb,i);
-                    if (!jl_has_free_typevars(apara) && !jl_has_free_typevars(bpara) &&
-                        !jl_types_equal(apara, bpara))
+                    int afree = jl_has_free_typevars(apara);
+                    int bfree = jl_has_free_typevars(bpara);
+                    if (!afree && !bfree && !jl_types_equal(apara, bpara))
                         return 0;
-                    if (type_morespecific_(apara, bpara, 1, env))
+                    if (type_morespecific_(apara, bpara, 1, env) && (jl_is_typevar(apara) || !afree || bfree))
                         ascore += 1;
-                    else if (type_morespecific_(bpara, apara, 1, env))
+                    else if (type_morespecific_(bpara, apara, 1, env) && (jl_is_typevar(bpara) || !bfree || afree))
                         bscore += 1;
+                    else if (eq_msp(apara, bpara, env)) {
+                        if (!afree && bfree)
+                            ascore += 1;
+                        else if (afree && !bfree)
+                            bscore += 1;
+                    }
                     if (jl_is_typevar(bpara) && !jl_is_typevar(apara) && !jl_is_type(apara))
                         ascore1 = 1;
                     else if (jl_is_typevar(apara) && !jl_is_typevar(bpara) && !jl_is_type(bpara))
@@ -2829,9 +2841,6 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
                     return 0;
                 return ascore > bscore || adiag > bdiag;
             }
-            else if (invariant) {
-                return 0;
-            }
             tta = tta->super; super = 1;
         }
         return 0;
@@ -2853,16 +2862,12 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
         if (invariant) {
             if (((jl_tvar_t*)a)->ub == jl_bottom_type)
                 return 1;
-            if (jl_has_free_typevars(b)) {
-                if (type_morespecific_(((jl_tvar_t*)a)->ub, b, 0, env) ||
-                    eq_msp(((jl_tvar_t*)a)->ub, b, env))
-                    return num_occurs((jl_tvar_t*)a, env) >= 2;
-            }
-            else {
+            if (eq_msp(((jl_tvar_t*)a)->ub, b, env))
+                return num_occurs((jl_tvar_t*)a, env) >= 2;
+            if (!jl_has_free_typevars(b))
                 return 0;
-            }
         }
-        return type_morespecific_((jl_value_t*)((jl_tvar_t*)a)->ub, b, 0, env);
+        return type_morespecific_(((jl_tvar_t*)a)->ub, b, 0, env);
     }
     if (jl_is_typevar(b)) {
         if (!jl_is_type(a))
@@ -2870,16 +2875,28 @@ static int type_morespecific_(jl_value_t *a, jl_value_t *b, int invariant, jl_ty
         if (invariant) {
             if (((jl_tvar_t*)b)->ub == jl_bottom_type)
                 return 0;
+            if (eq_msp(a, ((jl_tvar_t*)b)->ub, env))
+                return num_occurs((jl_tvar_t*)b, env) < 2;
             if (jl_has_free_typevars(a)) {
-                if (type_morespecific_(a, ((jl_tvar_t*)b)->ub, 0, env) ||
-                    eq_msp(a, ((jl_tvar_t*)b)->ub, env))
+                if (type_morespecific_(a, ((jl_tvar_t*)b)->ub, 0, env))
                     return num_occurs((jl_tvar_t*)b, env) < 2;
             }
             else {
+                if (obviously_disjoint(a, ((jl_tvar_t*)b)->ub, 1))
+                    return 0;
+                if (type_morespecific_(((jl_tvar_t*)b)->ub, a, 0, env))
+                    return 0;
                 return 1;
             }
         }
-        return type_morespecific_(a, (jl_value_t*)((jl_tvar_t*)b)->ub, 0, env);
+        return type_morespecific_(a, ((jl_tvar_t*)b)->ub, 0, env);
+    }
+
+    if (jl_is_unionall(a)) {
+        HANDLE_UNIONALL_A;
+    }
+    if (jl_is_unionall(b)) {
+        HANDLE_UNIONALL_B;
     }
 
     return 0;
