@@ -39,7 +39,7 @@ Standard library changes
   * `diff` now supports arrays of arbitrary dimensionality and can operate over any dimension ([#29827]).
   * `sprandn` now supports result types like `ComplexF64` or `Float32` ([#30083]).
   * `parse` now allows strings representing integer 0 and 1 for type `Bool` ([#29980]).
-  * `tail` now works on named tuples ([#29595]).
+  * `Base.tail` now works on named tuples ([#29595]).
 
 Compiler/Runtime improvements
 -----------------------------
